@@ -49,7 +49,17 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="📝 Изменить текст под оплатой", callback_data="admin:edit_payment_text")
     kb.button(text="➕ Добавить отзыв", callback_data="admin:add_review")
     kb.button(text="🗂 Список отзывов / удалить", callback_data="admin:list_reviews")
+    kb.button(text="📢 Рассылка", callback_data="admin:broadcast")
+    kb.button(text="📊 Статистика", callback_data="admin:stats")
     kb.button(text="⬅️ В главное меню", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def confirm_broadcast_kb(recipients: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Отправить всем ({recipients})", callback_data="admin:broadcast_confirm")
+    kb.button(text="❌ Отмена", callback_data="admin:menu")
     kb.adjust(1)
     return kb.as_markup()
 

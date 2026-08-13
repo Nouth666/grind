@@ -1,4 +1,7 @@
+import asyncio
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -6,7 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 import config
 import keyboards as kb
-from storage import add_review, delete_review, get_content, update_content
+from storage import add_review, delete_review, get_all_user_ids, get_content, get_stats, update_content
 
 router = Router(name="admin")
 router.message.filter(F.from_user.id.in_(config.ADMIN_IDS))
@@ -19,6 +22,7 @@ class AdminStates(StatesGroup):
     editing_payment_button = State()
     editing_payment_text = State()
     adding_review = State()
+    broadcasting = State()
 
 
 @router.message(Command("admin"))
@@ -189,3 +193,93 @@ async def cb_delete_review(callback: CallbackQuery):
         await callback.message.delete()
     except Exception:
         pass
+
+
+@router.callback_query(F.data == "admin:broadcast")
+async def cb_broadcast(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    recipients = len(get_all_user_ids())
+    await state.set_state(AdminStates.broadcasting)
+    await callback.message.edit_text(
+        f"Пришли сообщение для рассылки (текст, фото, видео и т.п.) — оно уйдёт всем, "
+        f"кто хоть раз пользовался ботом (сейчас это {recipients} чел.).",
+        reply_markup=kb.cancel_kb(),
+    )
+
+
+@router.message(AdminStates.broadcasting)
+async def preview_broadcast(message: Message, state: FSMContext):
+    recipients = len(get_all_user_ids())
+    if recipients == 0:
+        await state.clear()
+        await message.answer("Пока никто не пользовался ботом — рассылать некому.", reply_markup=kb.admin_menu_kb())
+        return
+    await state.update_data(broadcast_chat_id=message.chat.id, broadcast_message_id=message.message_id)
+    await state.set_state(AdminStates.broadcasting)
+    await message.answer("Вот так будет выглядеть сообщение 👇")
+    await message.copy_to(message.chat.id)
+    await message.answer(
+        f"Отправить это {recipients} пользователям?",
+        reply_markup=kb.confirm_broadcast_kb(recipients),
+    )
+
+
+@router.callback_query(F.data == "admin:broadcast_confirm")
+async def cb_broadcast_confirm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await state.clear()
+    chat_id = data.get("broadcast_chat_id")
+    message_id = data.get("broadcast_message_id")
+    if not chat_id or not message_id:
+        await callback.message.edit_text("Сообщение для рассылки не найдено, попробуй заново.", reply_markup=kb.admin_menu_kb())
+        return
+
+    user_ids = [uid for uid in get_all_user_ids() if uid != callback.from_user.id]
+    await callback.message.edit_text(f"⏳ Отправляю {len(user_ids)} пользователям...")
+
+    success = 0
+    failed = 0
+    for user_id in user_ids:
+        try:
+            await callback.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+            success += 1
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await callback.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+                success += 1
+            except Exception:
+                failed += 1
+        except (TelegramForbiddenError, TelegramBadRequest):
+            failed += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    await callback.bot.send_message(
+        callback.message.chat.id,
+        f"✅ Рассылка завершена.\nДоставлено: {success}\nНе доставлено: {failed} (заблокировали бота и т.п.)",
+        reply_markup=kb.admin_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "admin:stats")
+async def cb_stats(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    stats = get_stats()
+    actions = stats["actions"]
+    text = (
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего заходило: <b>{stats['total_users']}</b>\n"
+        f"🆕 Новых сегодня: {stats['new_today']}\n"
+        f"🆕 Новых за 7 дней: {stats['new_7d']}\n"
+        f"🟢 Активных за 7 дней: {stats['active_7d']}\n\n"
+        "<b>Переходы по разделам (всего кликов):</b>\n"
+        f"📖 Описание: {actions['description']}\n"
+        f"⭐ Отзывы: {actions['reviews']}\n"
+        f"💳 Оплата: {actions['payment']}\n"
+        f"▶️ Запусков (/start): {actions['start']}"
+    )
+    await callback.message.edit_text(text, reply_markup=kb.admin_menu_kb())
